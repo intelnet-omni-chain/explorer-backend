@@ -1,0 +1,211 @@
+version: '3.9'
+
+networks:
+  omni_network:
+    external: false
+volumes:
+  blockscout-db:
+    external: false
+  blockscout-stats-db:
+    external: false
+
+services:
+  redis_db:
+    image: redis:alpine
+    networks:
+      - omni_network
+    container_name: redis_db
+    command: redis-server
+    # volumes:
+      # - /Users/hlhdai/.docker/mydata/blockscout/redis-data:/data
+
+  db-init:
+    image: postgres:15
+    networks:
+      - omni_network
+    volumes:
+      # - /Users/hlhdai/.docker/mydata/blockscout/blockscout-db-data:/var/lib/postgresql/data
+      - blockscout-db:/var/lib/postgresql/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        chown -R 2000:2000 /var/lib/postgresql/data
+
+  db:
+    image: postgres:15
+    networks:
+      - omni_network
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
+    user: 2000:2000
+    shm_size: 256m
+    restart: always
+    container_name: 'db'
+    command: postgres -c 'max_connections=200' -c 'client_connection_check_interval=60000'
+    environment:
+        POSTGRES_DB: 'blockscout'
+        POSTGRES_USER: 'blockscout'
+        POSTGRES_PASSWORD: 'ceWb1MeLBEeOIfk65gU8EjF8'
+    ports:
+      - target: 5432
+        published: 7432
+    volumes:
+      # - /Users/hlhdai/.docker/mydata/blockscout/blockscout-db-data:/var/lib/postgresql/data
+      - blockscout-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U blockscout -d blockscout"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    image: blockscout/blockscout
+    networks:
+      - omni_network
+    depends_on:
+      - db
+      - redis_db
+    restart: always
+    stop_grace_period: 5m
+    container_name: 'backend'
+    command: sh -c "bin/blockscout eval \"Elixir.Explorer.ReleaseTasks.create_and_migrate()\" && bin/blockscout start"
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    env_file:
+      - stack.env
+    # volumes:
+    #   - /Users/hlhdai/.docker/mydata/blockscout/logs/:/app/logs/
+    links:
+      - db:database
+    ports:
+      - 4000:4000
+    environment:
+        ETHEREUM_JSONRPC_HTTP_URL: http://host.docker.internal:9944/
+        ETHEREUM_JSONRPC_TRACE_URL: http://host.docker.internal:9944/
+        ETHEREUM_JSONRPC_WS_URL: ws://host.docker.internal:9944/
+        CHAIN_ID: '14001'
+
+  visualizer:
+    image: ghcr.io/blockscout/visualizer
+    networks:
+      - omni_network
+    platform: linux/amd64
+    restart: always
+    container_name: 'visualizer'
+    ports:
+      - 8051:8050
+    env_file:
+      - stack.env
+
+  sig-provider:
+    image: ghcr.io/blockscout/sig-provider
+    networks:
+      - omni_network
+    platform: linux/amd64
+    restart: always
+    container_name: 'sig-provider'
+
+  frontend:
+    image: ghcr.io/blockscout/frontend
+    networks:
+      - omni_network
+    depends_on:
+      - backend
+    platform: linux/amd64
+    restart: always
+    container_name: 'frontend'
+    ports:
+      - 3000:4000
+    env_file:
+      - stack.env
+
+  stats-db-init:
+    image: postgres:15
+    networks:
+      - omni_network
+    volumes:
+      # - /Users/hlhdai/.docker/mydata/blockscout/stats-db-data:/var/lib/postgresql/data
+      - blockscout-stats-db:/var/lib/postgresql/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        chown -R 2000:2000 /var/lib/postgresql/data
+
+  stats-db:
+    image: postgres:15
+    networks:
+      - omni_network
+    depends_on:
+      - stats-db-init
+      - backend
+    user: 2000:2000
+    shm_size: 256m
+    restart: always
+    container_name: 'stats-postgres'
+    command: postgres -c 'max_connections=200'
+    environment:
+        POSTGRES_DB: 'stats'
+        POSTGRES_USER: 'stats'
+        POSTGRES_PASSWORD: 'n0uejXPl61ci6ldCuE2gQU5Y'
+    ports:
+      - target: 5432
+        published: 7433
+    volumes:
+      # - /Users/hlhdai/.docker/mydata/blockscout/stats-db-data:/var/lib/postgresql/data
+      - blockscout-stats-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stats -d stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  stats:
+    image: ghcr.io/blockscout/stats
+    networks:
+      - omni_network
+    depends_on:
+      - stats-db
+    platform: linux/amd64
+    restart: always
+    container_name: 'stats'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    # ports:
+    #   - 8050:8050
+    env_file:
+      - stack.env
+    environment:
+      - STATS__DB_URL=postgres://stats:n0uejXPl61ci6ldCuE2gQU5Y@stats-db:5432/stats
+      - STATS__BLOCKSCOUT_DB_URL=postgresql://blockscout:ceWb1MeLBEeOIfk65gU8EjF8@db:5432/blockscout
+      - STATS__CREATE_DATABASE=true
+      - STATS__RUN_MIGRATIONS=true
+    
+  proxy:
+    image: nginx
+    networks:
+      - omni_network
+    depends_on:
+      - backend
+      - frontend
+      - stats
+    container_name: proxy
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    volumes:
+      # - "../proxy:/etc/nginx/templates"
+      - "/Users/hlhdai/Works/Intelnet/Omnichain/blockscout/docker-compose/proxy:/etc/nginx/templates"
+    environment:
+      BACK_PROXY_PASS: ${BACK_PROXY_PASS:-http://backend:4000}
+      FRONT_PROXY_PASS: ${FRONT_PROXY_PASS:-http://frontend:4000}
+    ports:
+      - target: 80
+        published: 80
+      - target: 8080
+        published: 8080
+      - target: 8081
+        published: 8081
